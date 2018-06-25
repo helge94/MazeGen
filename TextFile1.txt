@@ -1,0 +1,293 @@
+#include "stdafx.h"
+#include <iostream>
+#include "bspDungeon.h"
+
+
+bspDungeon::bspDungeon(int c, int r, sf::RenderWindow* window, float w, float h) :
+	m_Window(window), m_Col(c), m_Row(r), m_Width(w), m_Height(h), m_TileSize(sf::Vector2f(m_Width / r, m_Height / c))
+{
+	m_Tree = new Leaf(0, 0, m_Col - 1, m_Row - 1);
+	m_Regions = 0;
+	m_Tree->m_Region = m_Regions++;
+
+	m_WallShape = sf::RectangleShape(m_TileSize);
+	m_WallShape.setOutlineThickness(1.f);
+	m_WallShape.setOutlineColor(m_OutlineColor);
+	m_WallShape.setFillColor(m_WallColor);
+
+
+	CreateTilemap();
+	Split(m_Tree);
+	AddRoomAreas(m_Tree);
+	Connect(m_Tree);
+	ConnectAreas(m_Tree);
+	//PrintMergedAreas(m_Tree);
+}
+
+
+void bspDungeon::CreateTilemap()
+{
+	for (int i = 0; i < m_Col; i++) {
+		std::vector<Tile> col;
+		for (int j = 0; j < m_Row; j++) {
+			Tile tile(sf::Vector2i(j, i));
+			tile.m_Type = none;
+			tile.m_Region = -1;
+			col.push_back(tile);
+		}
+		m_Tiles.push_back(col);
+	}
+}
+
+void bspDungeon::AddRooms(Leaf * l)
+{
+	int temp;
+	int w = ((temp = rand() % l->m_RoomArea.width) < (MinRoom - 1) ? (MinRoom - 1) : temp);
+	int h = ((temp = rand() % l->m_RoomArea.height) < (MinRoom - 1) ? (MinRoom - 1) : temp);
+	if (w > MaxRoom) w = MaxRoom;
+	if (h > MaxRoom) h = MaxRoom;
+	int posx = ((l->m_RoomArea.width - w) <= 0 ? 0 : rand() % (l->m_RoomArea.width - w + 1));
+	int posy = ((l->m_RoomArea.height - h) <= 0 ? 0 : rand() % (l->m_RoomArea.height - h + 1));
+	l->m_Room = sf::IntRect(l->m_RoomArea.left + posx, l->m_RoomArea.top + posy, w, h);
+
+	for (int i = l->m_Room.left; i < l->m_Room.left + l->m_Room.width; i++) {
+		for (int j = l->m_Room.top; j < l->m_Room.top + l->m_Room.height; j++) {
+			m_Tiles[j][i].m_Type = roomFloor;
+			m_Tiles[j][i].m_Region = l->m_Region;
+		}
+	}
+}
+
+void bspDungeon::AddRoomAreas(Leaf * l)
+{
+	if (l->m_LeftChild)
+		AddRoomAreas(l->m_LeftChild);
+	if (l->m_RightChild)
+		AddRoomAreas(l->m_RightChild);
+	if (!l->m_RightChild && !l->m_LeftChild) {
+		l->m_RoomArea = sf::IntRect(l->x + 1, l->y + 1, l->width - 1, l->height - 1);
+		AddRooms(l);
+	}
+}
+
+void bspDungeon::Split(Leaf* l)
+{
+
+	if (l->m_LeftChild || l->m_RightChild)
+		return;
+	bool m_SplitH = rand() % 2 > 0;
+	if (l->width > l->height && (double)l->width / (double)l->height >= 1.50)
+		m_SplitH = false;
+	else if (l->height > l->width && (double)l->height / (double)l->width >= 1.50)
+		m_SplitH = true;
+	
+	int size = (m_SplitH ? l->height : l->width) - MinRoom;
+	if (size <= MinRoom)
+		return;
+
+	int pos = rand() % (size - MinRoom) + MinRoom;
+
+	if (m_SplitH) {
+		l->m_LeftChild = new Leaf(l->x, l->y, l->width, pos);
+		l->m_RightChild = new Leaf(l->x, l->y + pos, l->width, l->height - pos);
+	}
+	else {
+		l->m_LeftChild = new Leaf(l->x, l->y, pos, l->height);
+		l->m_RightChild = new Leaf(l->x + pos, l->y, l->width - pos, l->height);
+	}
+	l->m_LeftChild->m_Parent = l;
+	l->m_LeftChild->m_Region = m_Regions++;
+	l->m_RightChild->m_Parent = l;
+	l->m_RightChild->m_Region = m_Regions++;
+
+	Split(l->m_LeftChild);
+	Split(l->m_RightChild);
+}
+
+void bspDungeon::ConnectAreas(Leaf * l)
+{
+	if (!l->m_LeftChild || !l->m_RightChild) return;
+	if (l->m_LeftChild->m_Region != l->m_Region) ConnectAreas(l->m_LeftChild);
+	if (l->m_RightChild->m_Region != l->m_Region) ConnectAreas(l->m_RightChild);
+	if (l == m_Tree) return;
+	if (l->m_LeftChild->m_Region == l->m_RightChild->m_Region) {
+		Leaf* sibling = l->m_Parent->GetSibling(l);
+		if(sibling->m_LeftChild || sibling -> m_RightChild)
+			if (!(sibling->m_LeftChild->m_Region == sibling->m_RightChild->m_Region)) return;
+		
+
+		std::vector<sf::Vector2i> p1, p2;
+		l->GetMergedRoomPoint(p1);
+		sibling->GetMergedRoomPoint(p2);
+		
+		std::vector<sf::Vector2i> points = GetClosestRoom(p1, p2);
+		while (true) {
+			l->ComparePoints(points[0], points[1]);
+
+			Directions dir1 = CheckPoint(points[0], l);
+			points[0] += dirArr[dir1];
+			if (m_Tiles[points[0].y][points[0].x].m_Type != roomFloor) {
+				l->m_Hallway.push_back(sf::Vector2i(points[0].x, points[0].y));
+				m_Tiles[l->m_Hallway.back().y][l->m_Hallway.back().x].m_Region = l->m_Region;
+				m_Tiles[l->m_Hallway.back().y][l->m_Hallway.back().x].m_Type = tileFloor;
+			}
+
+			if (CheckCompletion(points[0], l))
+				break;
+
+		}
+		l->m_Region = l->m_Parent->m_Region;
+		sibling->m_Region = l->m_Parent->m_Region;
+	
+	}
+	
+}
+
+void bspDungeon::Connect(Leaf * l)
+{
+	if (l->m_LeftChild) Connect(l->m_LeftChild);
+	if (l->m_RightChild) Connect(l->m_RightChild);
+	if (!l->m_RightChild || !l->m_LeftChild) {
+		if (l->m_Parent->GetSibling(l)->m_LeftChild || l->m_Parent->GetSibling(l)->m_RightChild) return;
+		if (l->m_Region == l->m_Parent->m_Region) return;
+		Leaf* sibling = l->m_Parent->GetSibling(l);
+		sf::Vector2i p1 = l->GetRoomPoint();
+		sf::Vector2i p2 = sibling->GetSiblingRoomPoint(l);
+	
+		while (true) {
+			l->ComparePoints(p1, p2);			
+			Directions dir1 = CheckPoint(p1, l);
+			p1 += dirArr[dir1];
+			if (m_Tiles[p1.y][p1.x].m_Type != roomFloor) {
+				l->m_Hallway.push_back(sf::Vector2i(p1.x, p1.y));
+				m_Tiles[l->m_Hallway.back().y][l->m_Hallway.back().x].m_Region = l->m_Region;
+				m_Tiles[l->m_Hallway.back().y][l->m_Hallway.back().x].m_Type = tileFloor;
+			}
+			if (CheckCompletion(p1, l)) break;
+		}
+		l->m_Region = l->m_Parent->m_Region;
+		sibling->m_Region = l->m_Parent->m_Region;
+		UpdateRegion(l);
+		UpdateRegion(sibling);
+	}
+}
+
+void bspDungeon::UpdateRegion(Leaf * l)
+{
+	for (int i = l->m_Room.top; i < l->m_Room.top + l->m_Room.height; i++) {
+		for (int j = l->m_Room.left; j < l->m_Room.left + l->m_Room.width; j++) {
+			m_Tiles[i][j].m_Region = l->m_Region;
+		}
+	}
+}
+
+bool bspDungeon::CheckDirections(Directions dir, sf::Vector2i p, Leaf* l)
+{
+	Directions revDir = l->GetDirection(dir);
+	for (int i = m_North; i <= m_East; i++) {
+		if (i == revDir) continue;
+		sf::Vector2i checkPoint = p + dirArr[i];
+
+		if (!(checkPoint.x >= l->m_Room.left && checkPoint.x <= l->m_Room.left + (l->m_Room.width - 1)))
+			if (m_Tiles[checkPoint.y][checkPoint.x].m_Region == l->m_Region) return false;
+		
+		if (!(checkPoint.y >= l->m_Room.top && checkPoint.y <= l->m_Room.top + (l->m_Room.height - 1)))
+			if (m_Tiles[checkPoint.y][checkPoint.x].m_Region == l->m_Region) return false;
+
+		if (m_Tiles[checkPoint.y][checkPoint.x].m_Region != -1)
+			if (m_Tiles[checkPoint.y][checkPoint.x].m_Region != l->m_Parent->GetSibling(l)->m_Region) return false;
+				
+	}
+
+	return true;
+}
+
+bool bspDungeon::CheckCompletion(sf::Vector2i p, Leaf * l)
+{
+	for (int i = m_North; i <= m_East; i++) {
+		sf::Vector2i checkPoint = p + dirArr[i];
+		if (m_Tiles[checkPoint.y][checkPoint.x].m_Region == l->m_Parent->GetSibling(l)->m_Region) return true;
+	}
+	return false;
+}
+
+
+Directions bspDungeon::CheckPoint(sf::Vector2i point, Leaf * l)
+{
+	int value = rand() % l->m_Dir.size();
+	if (CheckDirections(l->m_Dir[value], point + dirArr[l->m_Dir[value]], l)) return l->m_Dir[value];
+	if (l->m_Dir.size() < 2) return l->m_Dir[value];
+	if (value == 0) return l->m_Dir[1];
+	return l->m_Dir[0];
+
+}
+
+std::vector<sf::Vector2i> bspDungeon::GetClosestRoom(std::vector<sf::Vector2i>& l, std::vector<sf::Vector2i>& sibling)
+{
+	sf::Vector2i p1 = l[0];
+	sf::Vector2i p2 = sibling[0];
+
+	for (int i = 0; i < l.size(); i++) {
+		for (int j = 0; j < sibling.size(); j++) {
+			int x = std::abs(l[i].x - sibling[j].x);
+			int y = std::abs(l[i].y - sibling[j].y);
+			int xCurr = std::abs(p1.x - p2.x);
+			int yCurr = std::abs(p1.y - p2.y);
+			if ((x + y) < (xCurr + yCurr)) {
+				p1 = l[i];
+				p2 = sibling[j];
+			}
+		}
+	}
+
+
+	return std::vector<sf::Vector2i>{p1, p2};
+}
+
+
+bspDungeon::~bspDungeon()
+{
+}
+
+void bspDungeon::Draw()
+{
+	for (int i = 0; i < m_Tiles.size(); i++) {
+		for (int j = 0; j < m_Tiles[i].size(); j++) {
+			if (m_Tiles[i][j].m_Type == tileFloor) {
+				m_Tiles[i][j].SetShape(m_WallShape);
+				m_Tiles[i][j].GetShape().setPosition((m_Tiles[i][j].pos.x * m_TileSize.x) + 15,
+					(m_Tiles[i][j].pos.y * m_TileSize.y) + 15);
+				m_Tiles[i][j].GetShape().setFillColor(sf::Color::White);
+				m_Tiles[i][j].Draw(*m_Window);
+			}
+			else if (m_Tiles[i][j].m_Type == connectedFloor) {
+				m_Tiles[i][j].SetShape(m_WallShape);
+				m_Tiles[i][j].GetShape().setPosition((m_Tiles[i][j].pos.x * m_TileSize.x) + 15,
+					(m_Tiles[i][j].pos.y * m_TileSize.y) + 15);
+				m_Tiles[i][j].GetShape().setFillColor(sf::Color::Black);
+				m_Tiles[i][j].Draw(*m_Window);
+			}
+			else if (m_Tiles[i][j].m_Type == connectionFloor) {
+				m_Tiles[i][j].SetShape(m_WallShape);
+				m_Tiles[i][j].GetShape().setPosition((m_Tiles[i][j].pos.x * m_TileSize.x) + 15,
+					(m_Tiles[i][j].pos.y * m_TileSize.y) + 15);
+				m_Tiles[i][j].GetShape().setFillColor(sf::Color::Cyan);
+				m_Tiles[i][j].Draw(*m_Window);
+			}
+			else if (m_Tiles[i][j].m_Type == roomFloor) {
+				m_Tiles[i][j].SetShape(m_WallShape);
+				m_Tiles[i][j].GetShape().setPosition((m_Tiles[i][j].pos.x * m_TileSize.x) + 15,
+					(m_Tiles[i][j].pos.y * m_TileSize.y) + 15);
+				m_Tiles[i][j].GetShape().setFillColor(sf::Color::Yellow);
+				m_Tiles[i][j].Draw(*m_Window);
+			}
+			else if (m_Tiles[i][j].m_Type == roomWall) {
+				m_Tiles[i][j].SetShape(m_WallShape);
+				m_Tiles[i][j].GetShape().setPosition((m_Tiles[i][j].pos.x * m_TileSize.x) + 15,
+					(m_Tiles[i][j].pos.y * m_TileSize.y) + 15);
+				m_Tiles[i][j].GetShape().setFillColor(sf::Color::Green);
+				m_Tiles[i][j].Draw(*m_Window);
+			}
+		}
+	}
+}
